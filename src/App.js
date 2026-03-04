@@ -1,4 +1,9 @@
 import { useState, useEffect } from "react";
+import { createClient } from "@supabase/supabase-js";
+
+const SUPABASE_URL = "https://mhztlmgycnmszhoipsef.supabase.co";
+const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1oenRsbWd5Y25tc3pob2lwc2VmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI1ODYyMDksImV4cCI6MjA4ODE2MjIwOX0.sbcQENEDMOeXTUr_PhHZMOhYYZBsuPFddwE-5-Q6220";
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 const ANALYSTS = [
   { id: "MM", name: "Miguel Mendieta", color: "#3b82f6", bg: "#1e3a5f" },
@@ -32,17 +37,18 @@ const stageToSinco = {
 };
 
 const EMPTY_RQ = {
-  id:"", desc:"", cwa:"", cwp:"", iwp:"",
+  id:"", descripcion:"", cwa:"", cwp:"", iwp:"",
   analyst:"MM", stage:"radicada", oc:"",
-  observations:"", stageHistory:[],
+  observations:"", stage_history:[],
 };
 
 function nowISO() { return new Date().toISOString(); }
 
 function slaInfo(rq) {
   const si = STAGES.findIndex(s => s.id === rq.stage);
-  const entry = (rq.stageHistory || []).find(h => h.stage === rq.stage);
-  const entered = entry ? new Date(entry.ts) : new Date(rq.createdAt || Date.now());
+  const history = rq.stage_history || [];
+  const entry = history.find(h => h.stage === rq.stage);
+  const entered = entry ? new Date(entry.ts) : new Date(rq.created_at || Date.now());
   const spent = (Date.now() - entered.getTime()) / 3600000;
   const limit = (STAGES[si]?.sla || 1) * 8;
   if (spent >= limit)       return { bg:"#2e0c0c", text:"#ef4444", label:`🔴 +${(spent-limit).toFixed(0)}h vencido` };
@@ -121,15 +127,15 @@ function RQForm({ initial, onSave, onClose, allRqs }) {
   const [form, setForm] = useState({ ...EMPTY_RQ, ...initial });
   const set = (k,v) => setForm(f => ({ ...f, [k]:v }));
 
-  function handleSave() {
-    if (!form.desc.trim()) { alert("La descripción es requerida"); return; }
+  async function handleSave() {
+    if (!form.descripcion.trim()) { alert("La descripción es requerida"); return; }
     const isNew = !form.id;
     const id    = isNew ? nextId(allRqs) : form.id;
     const now   = nowISO();
-    const history = form.stageHistory?.length
-      ? form.stageHistory
+    const history = form.stage_history?.length
+      ? form.stage_history
       : [{ stage: form.stage, ts: now }];
-    onSave({ ...form, id, createdAt: form.createdAt || now, stageHistory: history });
+    await onSave({ ...form, id, created_at: form.created_at || now, stage_history: history });
     onClose();
   }
 
@@ -137,7 +143,7 @@ function RQForm({ initial, onSave, onClose, allRqs }) {
     <>
       <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
         <Field label="Descripción" required>
-          <input style={iS} value={form.desc} onChange={e=>set("desc",e.target.value)}
+          <input style={iS} value={form.descripcion} onChange={e=>set("descripcion",e.target.value)}
             placeholder='Ej: Válvulas de control 2"' />
         </Field>
         <Field label="Analista Responsable" required>
@@ -241,43 +247,66 @@ export default function App() {
   const [detailRQ, setDetailRQ] = useState(null);
   const [fAnalyst, setFAnalyst] = useState("all");
   const [fStage,   setFStage]   = useState("all");
+  const [loading,  setLoading]  = useState(true);
   const [,         setTick]     = useState(0);
 
   useEffect(() => {
+    loadData();
     const t = setInterval(() => setTick(x => x+1), 15000);
     return () => clearInterval(t);
   }, []);
 
-  function addLog(msg) {
-    setActivity(a => [{ msg, ts: nowISO() }, ...a].slice(0,40));
+  async function loadData() {
+    setLoading(true);
+    const { data: rqData } = await supabase.from("requisiciones").select("*").order("created_at", { ascending: false });
+    const { data: actData } = await supabase.from("actividad").select("*").order("created_at", { ascending: false }).limit(40);
+    if (rqData) setRqs(rqData);
+    if (actData) setActivity(actData);
+    setLoading(false);
   }
 
-  function saveRQ(rq) {
+  async function addLog(msg) {
+    const { data } = await supabase.from("actividad").insert([{ msg, created_at: nowISO() }]).select();
+    if (data) setActivity(a => [data[0], ...a].slice(0,40));
+  }
+
+  async function saveRQ(rq) {
     const isNew = !rqs.find(r => r.id === rq.id);
-    setRqs(prev => isNew ? [...prev, rq] : prev.map(r => r.id === rq.id ? rq : r));
-    addLog(isNew
-      ? `${getAnalyst(rq.analyst).name} radicó ${rq.id} — "${rq.desc}"`
-      : `${getAnalyst(rq.analyst).name} editó ${rq.id}`);
+    if (isNew) {
+      const { data } = await supabase.from("requisiciones").insert([rq]).select();
+      if (data) setRqs(prev => [data[0], ...prev]);
+    } else {
+      const { data } = await supabase.from("requisiciones").update(rq).eq("id", rq.id).select();
+      if (data) setRqs(prev => prev.map(r => r.id === rq.id ? data[0] : r));
+    }
+    const analyst = getAnalyst(rq.analyst).name;
+    await addLog(isNew
+      ? `${analyst} radicó ${rq.id} — "${rq.descripcion}"`
+      : `${analyst} editó ${rq.id}`);
   }
 
-  function advanceStage(rq, nextStage, obs, oc) {
+  async function advanceStage(rq, nextStage, obs, oc) {
     const now = nowISO();
     const updated = {
-      ...rq, stage:nextStage,
+      ...rq, stage: nextStage,
       oc: oc || rq.oc,
       observations: obs || rq.observations,
-      stageHistory: [...(rq.stageHistory||[]), { stage:nextStage, ts:now }],
+      stage_history: [...(rq.stage_history||[]), { stage: nextStage, ts: now }],
     };
-    setRqs(prev => prev.map(r => r.id === rq.id ? updated : r));
-    if (detailRQ?.id === rq.id) setDetailRQ(updated);
+    const { data } = await supabase.from("requisiciones").update(updated).eq("id", rq.id).select();
+    if (data) {
+      setRqs(prev => prev.map(r => r.id === rq.id ? data[0] : r));
+      if (detailRQ?.id === rq.id) setDetailRQ(data[0]);
+    }
     const st = getStage(nextStage);
-    addLog(`${getAnalyst(rq.analyst).name} avanzó ${rq.id} → ${st.icon} ${st.label}${obs ? ` · "${obs}"` : ""}`);
+    await addLog(`${getAnalyst(rq.analyst).name} avanzó ${rq.id} → ${st.icon} ${st.label}${obs ? ` · "${obs}"` : ""}`);
   }
 
-  function deleteRQ(id) {
-    if (!confirm(`¿Eliminar ${id}?`)) return;
+  async function deleteRQ(id) {
+    if (!window.confirm(`¿Eliminar ${id}?`)) return;
+    await supabase.from("requisiciones").delete().eq("id", id);
     setRqs(prev => prev.filter(r => r.id !== id));
-    addLog(`RQ ${id} eliminada`);
+    await addLog(`RQ ${id} eliminada`);
   }
 
   const filtered = rqs.filter(r =>
@@ -315,11 +344,23 @@ export default function App() {
     { id:"actividad", icon:"⚡", label:"Actividad"    },
   ];
 
+  if (loading) return (
+    <div style={{ background:C.bg, color:C.text, minHeight:"100vh",
+      display:"flex", alignItems:"center", justifyContent:"center",
+      flexDirection:"column", gap:16, fontFamily:"sans-serif" }}>
+      <div style={{ fontSize:"2rem" }}>⚙️</div>
+      <div style={{ fontSize:"1rem", fontWeight:600 }}>Conectando con Supabase...</div>
+      <div style={{ fontSize:"0.8rem", color:C.dim }}>Cargando datos en tiempo real</div>
+    </div>
+  );
+
   return (
     <div style={{ fontFamily:"'Segoe UI',system-ui,sans-serif", background:C.bg,
       color:C.text, minHeight:"100vh", display:"flex", fontSize:14 }}>
 
-      {/* ── SIDEBAR ── */}
+      <style>{`@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}`}</style>
+
+      {/* SIDEBAR */}
       <aside style={{ width:190, flexShrink:0, background:C.bg2,
         borderRight:`1px solid ${C.border}`, display:"flex",
         flexDirection:"column", position:"sticky", top:0, height:"100vh" }}>
@@ -330,19 +371,18 @@ export default function App() {
             ProcuraControl
           </div>
           <div style={{ fontSize:"0.6rem", color:C.dim, marginTop:2,
-            letterSpacing:"0.08em", textTransform:"uppercase" }}>SLA Tracker</div>
+            letterSpacing:"0.08em", textTransform:"uppercase" }}>
+            🟢 Supabase conectado
+          </div>
         </div>
-
         <nav style={{ padding:"10px 8px", flex:1 }}>
           {navItems.map(n => (
-            <div key={n.id}
-              onClick={() => setView(n.id)}
+            <div key={n.id} onClick={() => setView(n.id)}
               style={{ display:"flex", alignItems:"center", gap:8,
                 padding:"8px 10px", borderRadius:8, cursor:"pointer",
                 marginBottom:2, fontSize:"0.82rem", fontWeight:500,
                 color: view===n.id ? "#3b82f6" : C.dim,
-                background: view===n.id ? "#1e3a5f33" : "transparent",
-                transition:"all 0.15s" }}>
+                background: view===n.id ? "#1e3a5f33" : "transparent" }}>
               <span>{n.icon}</span>{n.label}
               {n.id==="dashboard" && slaOverList.length > 0 &&
                 <span style={{ marginLeft:"auto", background:"#ef4444", color:"#fff",
@@ -351,7 +391,6 @@ export default function App() {
             </div>
           ))}
         </nav>
-
         <div style={{ padding:10, borderTop:`1px solid ${C.border}` }}>
           <div style={{ background:C.surface, borderRadius:8, padding:"8px 10px",
             display:"flex", alignItems:"center", gap:8 }}>
@@ -366,10 +405,9 @@ export default function App() {
         </div>
       </aside>
 
-      {/* ── MAIN ── */}
+      {/* MAIN */}
       <main style={{ flex:1, overflow:"auto", padding:"20px 24px", minWidth:0 }}>
 
-        {/* TOPBAR */}
         <div style={{ display:"flex", alignItems:"center",
           justifyContent:"space-between", marginBottom:18 }}>
           <div>
@@ -384,19 +422,21 @@ export default function App() {
               {rqs.length} RQs · {slaOverList.length} incumplidas · {slaWarnList.length} en riesgo
             </div>
           </div>
-          <button style={btn("#3b82f6")} onClick={() => setShowNew(true)}>+ Nueva RQ</button>
+          <div style={{ display:"flex", gap:8 }}>
+            <button style={btn("#1f2d45", C.muted)} onClick={loadData}>🔄 Actualizar</button>
+            <button style={btn("#3b82f6")} onClick={() => setShowNew(true)}>+ Nueva RQ</button>
+          </div>
         </div>
 
-        {/* ═══ DASHBOARD ═══ */}
+        {/* DASHBOARD */}
         {view === "dashboard" && <>
-          {/* KPIs */}
           <div style={{ display:"grid", gridTemplateColumns:"repeat(5,1fr)", gap:10, marginBottom:14 }}>
             {[
-              { label:"RQs Activas",   val:rqs.length,                                        accent:"#3b82f6" },
-              { label:"Cotizando",     val:rqs.filter(r=>r.stage==="cotizando"||r.stage==="cotizada").length, accent:"#06b6d4" },
-              { label:"OCs Emitidas",  val:rqs.filter(r=>r.stage==="oc").length,               accent:"#10b981" },
-              { label:"En Riesgo",     val:slaWarnList.length,                                 accent:"#f59e0b" },
-              { label:"Incumplidas",   val:slaOverList.length,                                 accent:"#ef4444" },
+              { label:"RQs Activas",  val:rqs.length, accent:"#3b82f6" },
+              { label:"Cotizando",    val:rqs.filter(r=>r.stage==="cotizando"||r.stage==="cotizada").length, accent:"#06b6d4" },
+              { label:"OCs Emitidas", val:rqs.filter(r=>r.stage==="oc").length, accent:"#10b981" },
+              { label:"En Riesgo",    val:slaWarnList.length, accent:"#f59e0b" },
+              { label:"Incumplidas",  val:slaOverList.length, accent:"#ef4444" },
             ].map(k => (
               <div key={k.label} style={{ background:C.surface, border:`1px solid ${C.border}`,
                 borderRadius:10, padding:"12px 14px", borderTop:`2px solid ${k.accent}` }}>
@@ -408,7 +448,6 @@ export default function App() {
             ))}
           </div>
 
-          {/* FILTROS + TABLA */}
           <div style={card}>
             <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between",
               padding:"12px 16px", borderBottom:`1px solid ${C.border}` }}>
@@ -426,7 +465,6 @@ export default function App() {
                 </select>
               </div>
             </div>
-
             {filtered.length === 0
               ? <div style={{ padding:32, textAlign:"center", color:C.dim }}>
                   <div style={{ fontSize:"2.5rem", marginBottom:8 }}>📭</div>
@@ -456,7 +494,7 @@ export default function App() {
                             </td>
                             <td style={{ padding:"9px 12px", borderBottom:`1px solid ${C.border}`,
                               fontSize:"0.8rem", maxWidth:180 }}>
-                              <div style={{ fontWeight:500 }}>{rq.desc}</div>
+                              <div style={{ fontWeight:500 }}>{rq.descripcion}</div>
                               {rq.observations && <div style={{ fontSize:"0.68rem",
                                 color:C.dim, marginTop:1 }}>{rq.observations}</div>}
                             </td>
@@ -498,14 +536,12 @@ export default function App() {
           </div>
         </>}
 
-        {/* ═══ KANBAN ═══ */}
+        {/* KANBAN */}
         {view === "kanban" && (
           <div style={card}>
             <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between",
               padding:"12px 16px", borderBottom:`1px solid ${C.border}` }}>
               <span style={{ fontWeight:700, fontSize:"0.88rem" }}>🔄 Pipeline por Estado</span>
-              <span style={{ fontSize:"0.65rem", background:"#1e3a5f", color:"#3b82f6",
-                padding:"2px 8px", borderRadius:6, fontWeight:700 }}>{rqs.length} RQs</span>
             </div>
             <div style={{ display:"flex", gap:8, padding:12, overflowX:"auto" }}>
               {STAGES.map(stage => {
@@ -522,11 +558,9 @@ export default function App() {
                     </div>
                     {col.length === 0
                       ? <div style={{ border:`1px dashed ${C.border}`, borderRadius:8,
-                          padding:"14px 10px", textAlign:"center",
-                          color:C.dim, fontSize:"0.7rem" }}>Vacío</div>
+                          padding:"14px 10px", textAlign:"center", color:C.dim, fontSize:"0.7rem" }}>Vacío</div>
                       : col.map(rq => (
-                        <div key={rq.id}
-                          onClick={() => { setAdvRQ(rq); }}
+                        <div key={rq.id} onClick={() => setAdvRQ(rq)}
                           onMouseEnter={e=>e.currentTarget.style.borderColor="#3b82f6"}
                           onMouseLeave={e=>e.currentTarget.style.borderColor=C.border}
                           style={{ background:C.bg2, border:`1px solid ${C.border}`,
@@ -535,9 +569,8 @@ export default function App() {
                           <div style={{ fontFamily:"monospace", fontSize:"0.62rem",
                             color:"#3b82f6", fontWeight:600, marginBottom:3 }}>{rq.id}</div>
                           <div style={{ fontSize:"0.73rem", fontWeight:500,
-                            lineHeight:1.3, marginBottom:5 }}>{rq.desc}</div>
-                          <div style={{ display:"flex", alignItems:"center",
-                            justifyContent:"space-between" }}>
+                            lineHeight:1.3, marginBottom:5 }}>{rq.descripcion}</div>
+                          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
                             <div style={{ display:"flex", alignItems:"center", gap:4 }}>
                               <Avatar id={rq.analyst} size={14}/>
                               <span style={{ fontSize:"0.6rem", color:C.dim }}>
@@ -552,13 +585,10 @@ export default function App() {
                 );
               })}
             </div>
-            <div style={{ padding:"0 12px 10px", fontSize:"0.7rem", color:C.dim }}>
-              💡 Haz clic en cualquier tarjeta para avanzar su etapa
-            </div>
           </div>
         )}
 
-        {/* ═══ ANALISTAS ═══ */}
+        {/* ANALISTAS */}
         {view === "analistas" && (
           <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:14 }}>
             {ANALYSTS.map(a => {
@@ -581,60 +611,44 @@ export default function App() {
                       color:pctC }}>{st.pct}% SLA</span>
                   </div>
                   <div style={{ padding:14 }}>
-                    <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)",
-                      gap:8, marginBottom:12 }}>
+                    <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:8, marginBottom:12 }}>
                       {[
                         { label:"Asignadas", val:st.total,           c:"#3b82f6" },
                         { label:"En SLA",    val:st.total - st.over, c:"#10b981" },
                         { label:"Vencidas",  val:st.over,            c:"#ef4444" },
                       ].map(k => (
-                        <div key={k.label} style={{ background:C.bg2,
-                          border:`1px solid ${C.border}`, borderRadius:8,
-                          padding:"8px", textAlign:"center" }}>
-                          <div style={{ fontSize:"1.4rem", fontWeight:800,
-                            color:k.c, fontFamily:"monospace" }}>{k.val}</div>
+                        <div key={k.label} style={{ background:C.bg2, border:`1px solid ${C.border}`,
+                          borderRadius:8, padding:"8px", textAlign:"center" }}>
+                          <div style={{ fontSize:"1.4rem", fontWeight:800, color:k.c, fontFamily:"monospace" }}>{k.val}</div>
                           <div style={{ fontSize:"0.6rem", color:C.dim, marginTop:2 }}>{k.label}</div>
                         </div>
                       ))}
                     </div>
-
-                    <div style={{ marginBottom:12 }}>
+                    <div style={{ marginBottom:10 }}>
                       <div style={{ display:"flex", justifyContent:"space-between",
                         fontSize:"0.68rem", color:C.dim, marginBottom:4 }}>
                         <span>Cumplimiento SLA</span>
                         <span style={{ color:pctC, fontWeight:700 }}>{st.pct}%</span>
                       </div>
                       <div style={{ height:5, background:C.bg2, borderRadius:3, overflow:"hidden" }}>
-                        <div style={{ height:"100%", borderRadius:3, background:pctC,
-                          width:`${st.pct}%`, transition:"width 0.5s" }}/>
+                        <div style={{ height:"100%", borderRadius:3, background:pctC, width:`${st.pct}%` }}/>
                       </div>
                     </div>
-
-                    <div style={{ fontSize:"0.65rem", color:C.dim, fontWeight:700,
-                      textTransform:"uppercase", letterSpacing:"0.07em", marginBottom:6 }}>
-                      RQs por etapa</div>
-                    {mine.length === 0
-                      ? <div style={{ textAlign:"center", color:C.dim,
-                          fontSize:"0.75rem", padding:8 }}>Sin RQs asignadas</div>
-                      : STAGES.map(stage => {
-                          const count = mine.filter(r => r.stage === stage.id).length;
-                          if (!count) return null;
-                          return (
-                            <div key={stage.id} style={{ display:"flex",
-                              alignItems:"center", gap:8, marginBottom:4 }}>
-                              <span style={{ fontSize:"0.75rem", minWidth:20 }}>{stage.icon}</span>
-                              <div style={{ flex:1, height:4, background:C.bg2,
-                                borderRadius:2, overflow:"hidden" }}>
-                                <div style={{ height:"100%", borderRadius:2,
-                                  background:stage.color,
-                                  width:`${(count/st.total)*100}%` }}/>
-                              </div>
-                              <span style={{ fontSize:"0.65rem", color:C.dim,
-                                minWidth:12, textAlign:"right" }}>{count}</span>
-                            </div>
-                          );
-                        })
-                    }
+                    {STAGES.map(stage => {
+                      const count = mine.filter(r => r.stage === stage.id).length;
+                      if (!count) return null;
+                      return (
+                        <div key={stage.id} style={{ display:"flex", alignItems:"center", gap:8, marginBottom:4 }}>
+                          <span style={{ fontSize:"0.75rem", minWidth:20 }}>{stage.icon}</span>
+                          <div style={{ flex:1, height:4, background:C.bg2, borderRadius:2, overflow:"hidden" }}>
+                            <div style={{ height:"100%", borderRadius:2, background:stage.color,
+                              width:`${(count/Math.max(st.total,1))*100}%` }}/>
+                          </div>
+                          <span style={{ fontSize:"0.65rem", color:C.dim, minWidth:12 }}>{count}</span>
+                        </div>
+                      );
+                    })}
+                    {mine.length === 0 && <div style={{ textAlign:"center", color:C.dim, fontSize:"0.75rem", padding:8 }}>Sin RQs asignadas</div>}
                   </div>
                 </div>
               );
@@ -642,7 +656,7 @@ export default function App() {
           </div>
         )}
 
-        {/* ═══ SINCO ═══ */}
+        {/* SINCO */}
         {view === "sinco" && <>
           <div style={card}>
             <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between",
@@ -651,13 +665,11 @@ export default function App() {
               <select style={{ ...sS, width:"auto", padding:"5px 10px", fontSize:"0.75rem" }}
                 value={detailRQ?.id||""} onChange={e=>setDetailRQ(rqs.find(r=>r.id===e.target.value)||null)}>
                 <option value="">— Seleccionar RQ —</option>
-                {rqs.map(r=><option key={r.id} value={r.id}>{r.id} · {r.desc}</option>)}
+                {rqs.map(r=><option key={r.id} value={r.id}>{r.id} · {r.descripcion}</option>)}
               </select>
             </div>
-
             <div style={{ padding:16 }}>
-              <div style={{ display:"flex", alignItems:"flex-start",
-                gap:0, overflowX:"auto", paddingBottom:4 }}>
+              <div style={{ display:"flex", alignItems:"flex-start", gap:0, overflowX:"auto" }}>
                 {SINCO_STEPS.map((step, i) => {
                   const cur  = detailRQ ? stageToSinco[detailRQ.stage] : 0;
                   const done = cur > step.id;
@@ -668,18 +680,15 @@ export default function App() {
                         <div style={{ width:50, height:50, borderRadius:10,
                           background: done?"#0c2e1e": act?"#092a40": C.surface,
                           border:`2px solid ${done?"#10b981": act?"#0ea5e9": C.border}`,
-                          display:"flex", alignItems:"center", justifyContent:"center",
-                          fontSize:"1.2rem",
-                          boxShadow: act?"0 0 16px #0ea5e940":"none",
-                          transition:"all 0.3s" }}>
+                          display:"flex", alignItems:"center", justifyContent:"center", fontSize:"1.2rem",
+                          boxShadow: act?"0 0 16px #0ea5e940":"none" }}>
                           {done ? "✅" : step.icon}
                         </div>
                         <div style={{ fontSize:"0.62rem", textAlign:"center",
                           color: done?"#10b981": act?"#0ea5e9": C.dim,
-                          fontWeight: act?700:400, maxWidth:72,
-                          lineHeight:1.3, whiteSpace:"pre-line" }}>{step.label}</div>
-                        <div style={{ fontSize:"0.55rem",
-                          color: done?"#10b981": act?"#0ea5e9":"#334155", fontWeight:600 }}>
+                          fontWeight: act?700:400, maxWidth:72, lineHeight:1.3,
+                          whiteSpace:"pre-line" }}>{step.label}</div>
+                        <div style={{ fontSize:"0.55rem", color: done?"#10b981": act?"#0ea5e9":"#334155", fontWeight:600 }}>
                           {done?"✓ Listo": act?"← Aquí":"Pendiente"}</div>
                       </div>
                       {i < SINCO_STEPS.length-1 && (
@@ -691,27 +700,24 @@ export default function App() {
                 })}
               </div>
             </div>
-
             {detailRQ
-              ? <div style={{ margin:"0 14px 14px", background:C.bg2,
-                  border:`1px solid ${C.border}`, borderRadius:10, padding:14 }}>
+              ? <div style={{ margin:"0 14px 14px", background:C.bg2, border:`1px solid ${C.border}`, borderRadius:10, padding:14 }}>
                   <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:10, marginBottom:10 }}>
                     {[
-                      { label:"RQ",          val:detailRQ.id,  mono:true,  c:"#3b82f6" },
+                      { label:"RQ", val:detailRQ.id, mono:true, c:"#3b82f6" },
                       { label:"Descripción", val:detailRQ.desc },
-                      { label:"Analista",    val:getAnalyst(detailRQ.analyst).name },
-                      { label:"Etapa",       val:`${getStage(detailRQ.stage).icon} ${getStage(detailRQ.stage).label}`, c:getStage(detailRQ.stage).color },
-                      { label:"CWA",         val:detailRQ.cwa||"—" },
-                      { label:"CWP",         val:detailRQ.cwp||"—" },
-                      { label:"IWP",         val:detailRQ.iwp||"—" },
-                      { label:"OC SINCO",    val:detailRQ.oc||"Pendiente", mono:true, c:detailRQ.oc?"#0ea5e9":C.dim },
+                      { label:"Analista", val:getAnalyst(detailRQ.analyst).name },
+                      { label:"Etapa", val:`${getStage(detailRQ.stage).icon} ${getStage(detailRQ.stage).label}`, c:getStage(detailRQ.stage).color },
+                      { label:"CWA", val:detailRQ.cwa||"—" },
+                      { label:"CWP", val:detailRQ.cwp||"—" },
+                      { label:"IWP", val:detailRQ.iwp||"—" },
+                      { label:"OC SINCO", val:detailRQ.oc||"Pendiente", mono:true, c:detailRQ.oc?"#0ea5e9":C.dim },
                     ].map(f => (
                       <div key={f.label}>
                         <div style={{ fontSize:"0.6rem", color:C.dim, fontWeight:700,
                           textTransform:"uppercase", letterSpacing:"0.07em", marginBottom:2 }}>{f.label}</div>
                         <div style={{ fontSize:"0.78rem", fontWeight:600,
-                          fontFamily:f.mono?"monospace":"inherit",
-                          color:f.c||C.text }}>{f.val}</div>
+                          fontFamily:f.mono?"monospace":"inherit", color:f.c||C.text }}>{f.val}</div>
                       </div>
                     ))}
                   </div>
@@ -720,14 +726,10 @@ export default function App() {
                     <button style={btn("#1e3a5f","#3b82f6")} onClick={()=>setEditRQ(detailRQ)}>✏️ Editar</button>
                   </div>
                 </div>
-              : <div style={{ padding:"12px 16px 16px", textAlign:"center",
-                  color:C.dim, fontSize:"0.8rem" }}>
-                  Selecciona una RQ para ver su posición en el flujo SINCO
-                </div>
+              : <div style={{ padding:"12px 16px 16px", textAlign:"center", color:C.dim, fontSize:"0.8rem" }}>
+                  Selecciona una RQ para ver su posición en el flujo SINCO</div>
             }
           </div>
-
-          {/* OCs emitidas */}
           <div style={card}>
             <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between",
               padding:"12px 16px", borderBottom:`1px solid ${C.border}` }}>
@@ -737,21 +739,16 @@ export default function App() {
                 {rqs.filter(r=>r.stage==="oc"&&r.oc).length} OCs</span>
             </div>
             {rqs.filter(r=>r.stage==="oc"&&r.oc).length === 0
-              ? <div style={{ padding:24, textAlign:"center", color:C.dim }}>
-                  Aún no hay OCs emitidas en SINCO</div>
+              ? <div style={{ padding:24, textAlign:"center", color:C.dim }}>Aún no hay OCs emitidas</div>
               : <div style={{ padding:"8px 14px 14px" }}>
                   {rqs.filter(r=>r.stage==="oc"&&r.oc).map(rq=>(
-                    <div key={rq.id}
-                      onClick={()=>setDetailRQ(rq)}
-                      style={{ display:"flex", alignItems:"center",
-                        justifyContent:"space-between", background:C.bg2,
-                        border:"1px solid #0c4a6e", borderRadius:8,
+                    <div key={rq.id} onClick={()=>setDetailRQ(rq)}
+                      style={{ display:"flex", alignItems:"center", justifyContent:"space-between",
+                        background:C.bg2, border:"1px solid #0c4a6e", borderRadius:8,
                         padding:"9px 12px", marginBottom:5, cursor:"pointer" }}>
                       <div>
-                        <div style={{ fontFamily:"monospace", fontSize:"0.75rem",
-                          color:"#0ea5e9", fontWeight:600 }}>{rq.oc}</div>
-                        <div style={{ fontSize:"0.75rem", color:C.muted, marginTop:1 }}>
-                          {rq.desc} · {rq.id}</div>
+                        <div style={{ fontFamily:"monospace", fontSize:"0.75rem", color:"#0ea5e9", fontWeight:600 }}>{rq.oc}</div>
+                        <div style={{ fontSize:"0.75rem", color:C.muted, marginTop:1 }}>{rq.descripcion} · {rq.id}</div>
                       </div>
                       <div style={{ display:"flex", alignItems:"center", gap:8 }}>
                         <Avatar id={rq.analyst} size={20}/>
@@ -765,7 +762,7 @@ export default function App() {
           </div>
         </>}
 
-        {/* ═══ ACTIVIDAD ═══ */}
+        {/* ACTIVIDAD */}
         {view === "actividad" && (
           <div style={card}>
             <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between",
@@ -778,22 +775,16 @@ export default function App() {
               ? <div style={{ padding:32, textAlign:"center", color:C.dim }}>
                   <div style={{ fontSize:"2.5rem", marginBottom:8 }}>📭</div>
                   <div style={{ fontWeight:600 }}>Sin actividad aún</div>
-                  <div style={{ fontSize:"0.78rem", marginTop:4 }}>
-                    Crea o actualiza RQs para ver el registro aquí</div>
                 </div>
               : <div style={{ padding:"4px 16px 16px" }}>
                   {activity.map((a,i)=>(
-                    <div key={i} style={{ display:"flex", gap:10,
-                      padding:"9px 0", borderBottom:`1px solid ${C.border}` }}>
-                      <div style={{ width:6, height:6, borderRadius:"50%",
-                        background:"#3b82f6", flexShrink:0, marginTop:5 }}/>
+                    <div key={i} style={{ display:"flex", gap:10, padding:"9px 0", borderBottom:`1px solid ${C.border}` }}>
+                      <div style={{ width:6, height:6, borderRadius:"50%", background:"#3b82f6", flexShrink:0, marginTop:5 }}/>
                       <div>
                         <div style={{ fontSize:"0.8rem", lineHeight:1.4 }}>{a.msg}</div>
-                        <div style={{ fontFamily:"monospace", fontSize:"0.62rem",
-                          color:C.dim, marginTop:2 }}>
-                          {new Date(a.ts).toLocaleString("es-CO",{
-                            hour:"2-digit", minute:"2-digit", day:"2-digit", month:"short"
-                          })}</div>
+                        <div style={{ fontFamily:"monospace", fontSize:"0.62rem", color:C.dim, marginTop:2 }}>
+                          {new Date(a.created_at).toLocaleString("es-CO",{
+                            hour:"2-digit", minute:"2-digit", day:"2-digit", month:"short" })}</div>
                       </div>
                     </div>
                   ))}
@@ -801,10 +792,8 @@ export default function App() {
             }
           </div>
         )}
-
       </main>
 
-      {/* ── MODALS ── */}
       {showNew && (
         <Modal title="➕ Nueva Requisición" onClose={()=>setShowNew(false)}>
           <RQForm initial={{}} allRqs={rqs} onSave={saveRQ} onClose={()=>setShowNew(false)}/>
@@ -820,8 +809,7 @@ export default function App() {
           onAdvance={(next, obs, oc) => advanceStage(advRQ, next, obs, oc)}
           onClose={()=>setAdvRQ(null)}/>
       )}
-
-      <style>{`@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}`}</style>
     </div>
   );
 }
+
